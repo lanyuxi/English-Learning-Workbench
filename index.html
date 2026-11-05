@@ -51459,6 +51459,19 @@ window.EN_DATA.audio = {
     /google us english/i, /microsoft (zira|hazel|susan)/i, /karen/i, /daniel/i,
     /google uk english male/i, /english/i,
   ];
+  // 孤立音素示范的近似拼写（与 scripts/build-phoneme-audio.py 保持一致，仅用于音频缺失时浏览器 TTS 兜底）
+  const PHONEME_APPROX = {
+    'v-ih': 'ih', 'v-ee': 'eeee', 'v-eh': 'eh', 'v-ae': 'aaa', 'v-uh': 'uh',
+    'v-ah': 'ahh', 'v-oh': 'o', 'v-aw': 'aww', 'v-u': 'uu', 'v-oo': 'oooo',
+    'v-ur': 'err', 'v-schwa': 'uh',
+    'd-ei': 'ay', 'd-ai': 'eye', 'd-oi': 'oy', 'd-au': 'ow', 'd-ou': 'oh',
+    'd-ia': 'ear', 'd-ea': 'air', 'd-ua': 'ure',
+    'c-p': 'puh', 'c-b': 'buh', 'c-t': 'tuh', 'c-d': 'duh', 'c-k': 'kuh',
+    'c-g': 'guh', 'c-f': 'fff', 'c-v': 'vvv', 'c-th': 'thhh', 'c-dh': 'thhh',
+    'c-s': 'sss', 'c-z': 'zzz', 'c-sh': 'shhh', 'c-zh': 'zhhh', 'c-h': 'hhh',
+    'c-ch': 'ch', 'c-j': 'juh', 'c-m': 'mmm', 'c-n': 'nnn', 'c-ng': 'nggg',
+    'c-l': 'lll', 'c-r': 'rrr', 'c-w': 'wuh', 'c-y': 'yuh',
+  };
   const tts = {
     audio: null,
     playingText: null,
@@ -51598,6 +51611,42 @@ window.EN_DATA.audio = {
         return this.say(words[index]).then(() => new Promise((resolve) => setTimeout(resolve, 260))).then(() => step(index + 1));
       };
       return step(0);
+    },
+    // 孤立音素示范：播放预生成的 ipa-<id>.mp3（近似音素）；文件缺失时用浏览器 TTS 近似兜底
+    sayPhonemeSound(phoneme) {
+      if (!phoneme || !phoneme.id) return Promise.resolve(false);
+      this.stop();
+      const url = AUDIO_BASE + 'ipa-' + phoneme.id + '.mp3';
+      const fallback = () => {
+        const text = PHONEME_APPROX[phoneme.id] || ((phoneme.examples && phoneme.examples[0] && phoneme.examples[0].w) || '');
+        if (!text) return Promise.resolve(false);
+        const browser = this.speakBrowser(text, {});
+        return browser ? browser.promise : Promise.resolve(false);
+      };
+      try {
+        const audio = new Audio(url);
+        audio.volume = clamp((state.settings && state.settings.volume) || 1, 0, 1);
+        this.audio = audio;
+        this.playingText = 'phoneme';
+        EN.emit('tts', 'phoneme');
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            this.audio = null;
+            this.playingText = null;
+            EN.emit('tts', null);
+            if (ok) resolve(true);
+            else fallback().then(resolve);
+          };
+          audio.addEventListener('ended', () => finish(true), { once: true });
+          audio.addEventListener('error', () => finish(false), { once: true });
+          audio.play().catch(() => finish(false));
+        });
+      } catch (error) {
+        return fallback();
+      }
     },
     sayLetter(letter) {
       if (!letter) return Promise.resolve(false);
@@ -52686,7 +52735,15 @@ window.EN_DATA.audio = {
         ),
         h('div', { class: 'spacer' }),
         h('button', { type: 'button', class: 'btn btn-primary', onclick: () => EN.tts.sayPhonemeSet(p) }, icon('play', 15), '播放例词'),
-        h('button', { type: 'button', class: 'btn', onclick: () => EN.tts.sayPhoneme(p) }, icon('speaker', 15), '单音示范'),
+        h('button', {
+          type: 'button', class: 'btn', title: '孤立音素演示：由自然语音合成近似发音；精确发音请以例词示范为准',
+          onclick: (event) => {
+            const btn = event.currentTarget;
+            btn.classList.add('playing');
+            const done = () => btn.classList.remove('playing');
+            EN.tts.sayPhonemeSound(p).then(done, done);
+          },
+        }, icon('speaker', 15), '单音示范（近似）'),
       ),
       h('div', { class: 'row' }, ...['未学', '入门', '熟悉', '掌握'].map((label, index) => h('button', {
         type: 'button',
