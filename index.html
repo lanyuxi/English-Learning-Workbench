@@ -592,6 +592,25 @@ textarea.input { height: auto; padding: 10px 12px; line-height: 1.6; resize: ver
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--faint) 35%, transparent); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 词库网格（浏览词库）───────────────────────────────── */
+.vocab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 9px; }
+@media (max-width: 640px) { .vocab-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 7px; } }
+.vocab-card {
+  display: flex; flex-direction: column; gap: 5px; text-align: left;
+  padding: 10px 11px; border-radius: 11px; border: 1px solid var(--line-soft);
+  background: var(--surface); color: var(--text); min-width: 0;
+  transition: border-color .12s ease, background-color .12s ease, transform .12s ease;
+}
+.vocab-card:hover { border-color: var(--accent-3); background: var(--surface-2); transform: translateY(-1px); }
+.vocab-card-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.vocab-card-word { font-family: var(--serif); font-size: 15.5px; font-weight: 700; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.vocab-card-ipa { font-size: 11.5px; color: var(--accent-3); font-family: var(--ipa-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vocab-card-zh { font-size: 12px; color: var(--muted); line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.vocab-card-meta { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 1px; }
+.vocab-card-meta .badge { font-size: 9.5px; padding: 1px 6px; }
+.vocab-count-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.vocab-load-more { display: flex; justify-content: center; padding: 14px 0 2px; }
 </style>
 </head>
 <body>
@@ -53488,15 +53507,37 @@ window.EN_DATA.audio = {
 
   /* ── 词库浏览 ─────────────────────────────────────────────── */
   function browsePage(container) {
+    const totalAll = I.vocabList.length + I.vocabExtendedList.length;
     const page = ui.page({ children: [] });
-    page.appendChild(ui.pageHead('浏览词库', `共 ${I.vocabList.length} 个词。点词查看详情与例句；搜索支持英文和中文。`));
+    page.appendChild(ui.pageHead('浏览词库', `共 ${totalAll} 个词（核心精学 ${I.vocabList.length} + 扩展认知 ${I.vocabExtendedList.length}）。卡片上直接显示音标与中文释义，点卡片看详情；搜索支持英文和中文。`));
     const filters = { q: '', level: '', topic: '', ielts: false, source: 'all' };
-    const listBox = h('div', { class: 'stack tight' });
-    let shown = 60;
+    const listBox = h('div', { class: 'stack' });
+    let shown = 120;
+    const vocabCard = (word) => {
+      const status = wordStatus(word.id);
+      const isExt = !!I.vocabExtended[word.id];
+      return h('button', {
+        type: 'button', class: 'vocab-card', title: `${word.w} ${word.ipa} ${word.pos || ''} ${word.zh}`,
+        onclick: (event) => { if (event.target.closest('.audio-btn')) return; EN.go('words/word/' + word.id); },
+      },
+        h('div', { class: 'vocab-card-top' },
+          h('span', { class: 'vocab-card-word' }, word.w),
+          ui.audioBtn(word.w, { cls: 'sm' }),
+        ),
+        h('div', { class: 'vocab-card-ipa' }, `${word.ipa || ''}${word.pos ? ' · ' + word.pos : ''}`),
+        h('div', { class: 'vocab-card-zh' }, word.zh || ''),
+        h('div', { class: 'vocab-card-meta' },
+          h('span', { class: 'badge sky' }, levelLabel(word.level)),
+          isExt ? h('span', { class: 'badge mint' }, '扩展') : h('span', { class: 'badge' }, '核心'),
+          word.ielts ? h('span', { class: 'badge accent' }, '雅思') : null,
+          status > 0 ? h('span', { class: 'badge ok' }, EN.statusLabel(status)) : null,
+        ),
+      );
+    };
     const renderList = () => {
       const query = filters.q.trim().toLowerCase();
       const base = filters.source === 'core' ? I.vocabList : filters.source === 'ext' ? I.vocabExtendedList : I.vocabList.concat(I.vocabExtendedList);
-      let items = base.filter((word) => {
+      const items = base.filter((word) => {
         if (filters.level && word.level !== Number(filters.level)) return false;
         if (filters.topic && word.topic !== filters.topic) return false;
         if (filters.ielts && !word.ielts) return false;
@@ -53504,25 +53545,30 @@ window.EN_DATA.audio = {
         return word.w.toLowerCase().includes(query) || String(word.zh || '').includes(query) || String(word.en || '').toLowerCase().includes(query);
       });
       listBox.innerHTML = '';
-      listBox.appendChild(h('div', { class: 'row between small faint' }, h('span', null, `匹配 ${items.length} 个词`), items.length > shown ? h('button', { type: 'button', class: 'btn btn-sm btn-ghost', onclick: () => { shown += 60; renderList(); } }, `再显示 60 个（还有 ${items.length - shown}）`) : null));
-      items.slice(0, shown).forEach((word) => listBox.appendChild(wordRow(word)));
+      listBox.appendChild(h('div', { class: 'vocab-count-row small faint' },
+        h('span', null, `匹配 ${items.length} 个词`),
+        items.length > shown ? h('button', { type: 'button', class: 'btn btn-sm btn-ghost', onclick: () => { shown += 120; renderList(); } }, `再显示 120 个（还有 ${items.length - shown}）`) : null,
+        h('span', { class: 'spacer' }),
+        items.length > shown ? h('button', { type: 'button', class: 'btn btn-sm btn-ghost', onclick: () => { shown = items.length; renderList(); } }, '显示全部') : null,
+      ));
+      listBox.appendChild(h('div', { class: 'vocab-grid' }, items.slice(0, shown).map(vocabCard)));
       if (!items.length) listBox.appendChild(ui.empty('没有匹配的词', '换个关键词或放宽筛选条件。'));
     };
     const topicOptions = [{ value: '', label: '全部主题' }].concat(Array.from(new Set(I.vocabList.concat(I.vocabExtendedList).map((w) => w.topic).filter(Boolean))).map((topic) => ({ value: topic, label: topic })));
     page.appendChild(h('div', { class: 'row' },
-      ui.searchBox('搜索英文或中文…', (value) => { filters.q = value; shown = 60; renderList(); }),
-      h('select', { class: 'select', onchange: (event) => { filters.source = event.target.value; shown = 60; renderList(); } },
-        h('option', { value: 'all' }, `全部词库（${I.vocabList.length + I.vocabExtendedList.length}）`),
+      ui.searchBox('搜索英文或中文…', (value) => { filters.q = value; shown = 120; renderList(); }),
+      h('select', { class: 'select', onchange: (event) => { filters.source = event.target.value; shown = 120; renderList(); } },
+        h('option', { value: 'all' }, `全部词库（${totalAll}）`),
         h('option', { value: 'core' }, `核心精学（${I.vocabList.length}）`),
         h('option', { value: 'ext' }, `扩展认知（${I.vocabExtendedList.length}）`),
       ),
-      h('select', { class: 'select', onchange: (event) => { filters.level = event.target.value; shown = 60; renderList(); } },
+      h('select', { class: 'select', onchange: (event) => { filters.level = event.target.value; shown = 120; renderList(); } },
         h('option', { value: '' }, '全部难度'), ...[1, 2, 3, 4, 5, 6].map((level) => h('option', { value: String(level) }, levelLabel(level))),
       ),
-      h('select', { class: 'select', onchange: (event) => { filters.topic = event.target.value; shown = 60; renderList(); } },
+      h('select', { class: 'select', onchange: (event) => { filters.topic = event.target.value; shown = 120; renderList(); } },
         topicOptions.map((option) => h('option', { value: option.value }, option.label)),
       ),
-      h('label', { class: 'row small muted', style: { gap: '6px' } }, h('input', { type: 'checkbox', onchange: (event) => { filters.ielts = event.target.checked; shown = 60; renderList(); } }), '只看雅思词'),
+      h('label', { class: 'row small muted', style: { gap: '6px' } }, h('input', { type: 'checkbox', onchange: (event) => { filters.ielts = event.target.checked; shown = 120; renderList(); } }), '只看雅思词'),
     ));
     page.appendChild(h('div', { class: 'card' }, listBox));
     renderList();
@@ -53549,15 +53595,26 @@ window.EN_DATA.audio = {
         ui.audioBtn(word.w, { cls: 'lg' }),
         h('button', { type: 'button', class: 'btn', onclick: () => EN.tts.saySlow(word.w) }, '慢速'),
       ),
-      h('div', { class: 'h2' }, word.zh),
-      h('div', { class: 'small muted' }, word.en || ''),
       h('div', { class: 'row' },
         h('span', { class: 'badge sky' }, levelLabel(word.level)),
         isExtended ? h('span', { class: 'badge mint' }, '扩展认知词') : h('span', { class: 'badge' }, '核心精学词'),
         word.ielts ? h('span', { class: 'badge accent' }, '雅思词') : null,
         (word.tags || []).map((tag) => h('span', { class: 'badge' }, tag)),
       ),
-      isExtended ? h('div', { class: 'tiny faint' }, '扩展词库为认知词表：音标 + 释义用于快速过词，语音由系统语音朗读；写作/口语需要例句时请查核心词条或使用例句库。') : null,
+      h('div', { class: 'callout key', style: { alignItems: 'flex-start' } },
+        h('span', { class: 'callout-icon' }, icon('book', 18)),
+        h('div', { class: 'stack tight', style: { flex: '1', minWidth: '0' } },
+          h('div', { class: 'row', style: { alignItems: 'baseline', flexWrap: 'wrap', gap: '8px' } },
+            h('span', { class: 'small faint' }, '中文意思'),
+            h('span', { style: { fontFamily: 'var(--serif)', fontSize: '24px', fontWeight: '700', color: 'var(--text-strong)' } }, word.zh || '（暂无释义）'),
+          ),
+          word.en ? h('div', { class: 'row', style: { alignItems: 'baseline', flexWrap: 'wrap', gap: '8px' } },
+            h('span', { class: 'small faint' }, '英文释义'),
+            h('span', { class: 'small', style: { color: 'var(--text)' } }, word.en),
+          ) : h('div', { class: 'small faint' }, isExtended ? '扩展词库只收「音标 + 中文释义」，暂无英文释义；需要英文解释/例句时可查核心词条或朗读材料。' : ''),
+          h('div', { class: 'tiny faint' }, [word.pos, '难度 ' + levelLabel(word.level), word.topic ? '主题 ' + word.topic : '', word.freq ? '频率 ' + word.freq : ''].filter(Boolean).join(' · ')),
+        ),
+      ),
       h('div', { class: 'row' }, ...[0, 1, 2, 3].map((value) => h('button', {
         type: 'button', class: 'pill' + (status === value ? ' active' : ''),
         onclick: () => { EN.setPointStatus('vocab-' + word.id, value); if (value >= 1) EN.store.update((s) => { const current = s.vocab[word.id] || {}; s.vocab[word.id] = Object.assign(EN.reviewVocab(current, value >= 2 ? 2 : 1)); }); EN.render(); },
