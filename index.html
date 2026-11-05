@@ -611,6 +611,9 @@ textarea.input { height: auto; padding: 10px 12px; line-height: 1.6; resize: ver
 .vocab-card-meta .badge { font-size: 9.5px; padding: 1px 6px; }
 .vocab-count-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .vocab-load-more { display: flex; justify-content: center; padding: 14px 0 2px; }
+.vocab-load-sentinel { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 20px 12px 6px; color: var(--faint); font-size: 12px; }
+.vocab-load-sentinel .loading-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); animation: pulse 1.2s ease-in-out infinite; }
+.modal .word-detail-modal { max-height: none; }
 </style>
 </head>
 <body>
@@ -53266,6 +53269,11 @@ window.EN_DATA.audio = {
   const { h, icon, ui, util, I } = EN;
   const { clamp, shuffle, normKey, diffChars, fmtInt } = util;
 
+  let browseObserver = null;
+  window.addEventListener('hashchange', () => {
+    if (browseObserver) { try { browseObserver.disconnect(); } catch (error) { /* noop */ } browseObserver = null; }
+  });
+
   function wordStatus(id) { return EN.vocabStatus(id); }
   function cardOf(id) { return EN.store.state.vocab[id] || null; }
 
@@ -53509,16 +53517,67 @@ window.EN_DATA.audio = {
   function browsePage(container) {
     const totalAll = I.vocabList.length + I.vocabExtendedList.length;
     const page = ui.page({ children: [] });
-    page.appendChild(ui.pageHead('浏览词库', `共 ${totalAll} 个词（核心精学 ${I.vocabList.length} + 扩展认知 ${I.vocabExtendedList.length}）。卡片上直接显示音标与中文释义，点卡片看详情；搜索支持英文和中文。`));
+    page.appendChild(ui.pageHead('浏览词库', `共 ${totalAll} 个词（核心精学 ${I.vocabList.length} + 扩展认知 ${I.vocabExtendedList.length}）。卡片上直接显示音标与中文释义，点卡片弹出详情；搜索支持英文和中文。`));
     const filters = { q: '', level: '', topic: '', ielts: false, source: 'all' };
-    const listBox = h('div', { class: 'stack' });
-    let shown = 120;
+    const PAGE_SIZE = 120;
+    let items = [];
+    let shown = 0;
+    let observer = null;
+    const gridBox = h('div', { class: 'vocab-grid' });
+    const countLabel = h('span', { class: 'small faint' });
+    const sentinel = h('div', { class: 'vocab-load-sentinel' });
+    const listBox = h('div', { class: 'stack' }, h('div', { class: 'vocab-count-row' }, countLabel), gridBox, sentinel);
+
+    const getIO = () => {
+      try {
+        if (typeof IntersectionObserver === 'function') return IntersectionObserver;
+        if (typeof window !== 'undefined' && typeof window.IntersectionObserver === 'function') return window.IntersectionObserver;
+      } catch (error) { /* noop */ }
+      return null;
+    };
+    const updateFooter = () => {
+      countLabel.textContent = `已显示 ${shown} / ${items.length} 个词`;
+      sentinel.innerHTML = '';
+      if (!items.length) { sentinel.textContent = '没有匹配的词'; return; }
+      if (shown >= items.length) { sentinel.textContent = `已全部加载（共 ${items.length} 个）`; return; }
+      if (getIO()) { sentinel.appendChild(h('span', { class: 'loading-dot' })); sentinel.appendChild(h('span', null, '向下滚动自动加载…')); return; }
+      // 浏览器不支持 IntersectionObserver 时的兜底按钮
+      sentinel.appendChild(h('button', {
+        type: 'button', class: 'btn btn-sm',
+        onclick: () => { appendBatch(); },
+      }, `加载更多（还有 ${items.length - shown} 个）`));
+    };
+    const appendBatch = () => {
+      if (shown >= items.length) { updateFooter(); return; }
+      const next = items.slice(shown, shown + PAGE_SIZE);
+      next.forEach((word) => gridBox.appendChild(vocabCard(word)));
+      shown += next.length;
+      updateFooter();
+    };
+    const disconnectObserver = () => {
+      if (observer) { try { observer.disconnect(); } catch (error) { /* noop */ } observer = null; }
+      if (browseObserver) { try { browseObserver.disconnect(); } catch (error) { /* noop */ } browseObserver = null; }
+    };
+    const connectObserver = () => {
+      disconnectObserver();
+      const IO = getIO();
+      if (!IO) return;
+      try {
+        const viewEl = document.getElementById('view');
+        observer = new IO((entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) appendBatch();
+        }, { root: viewEl || null, rootMargin: '700px 0px', threshold: 0 });
+        observer.observe(sentinel);
+        browseObserver = observer;
+      } catch (error) { /* 兜底按钮 */ }
+    };
     const vocabCard = (word) => {
       const status = wordStatus(word.id);
       const isExt = !!I.vocabExtended[word.id];
-      return h('button', {
-        type: 'button', class: 'vocab-card', title: `${word.w} ${word.ipa} ${word.pos || ''} ${word.zh}`,
-        onclick: (event) => { if (event.target.closest('.audio-btn')) return; EN.go('words/word/' + word.id); },
+      return h('div', {
+        class: 'vocab-card', role: 'button', tabindex: '0', title: `${word.w} ${word.ipa} ${word.pos || ''} ${word.zh}`,
+        onclick: (event) => { if (event.target.closest('.audio-btn')) return; openWordModal(word); },
+        onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openWordModal(word); } },
       },
         h('div', { class: 'vocab-card-top' },
           h('span', { class: 'vocab-card-word' }, word.w),
@@ -53537,38 +53596,33 @@ window.EN_DATA.audio = {
     const renderList = () => {
       const query = filters.q.trim().toLowerCase();
       const base = filters.source === 'core' ? I.vocabList : filters.source === 'ext' ? I.vocabExtendedList : I.vocabList.concat(I.vocabExtendedList);
-      const items = base.filter((word) => {
+      items = base.filter((word) => {
         if (filters.level && word.level !== Number(filters.level)) return false;
         if (filters.topic && word.topic !== filters.topic) return false;
         if (filters.ielts && !word.ielts) return false;
         if (!query) return true;
         return word.w.toLowerCase().includes(query) || String(word.zh || '').includes(query) || String(word.en || '').toLowerCase().includes(query);
       });
-      listBox.innerHTML = '';
-      listBox.appendChild(h('div', { class: 'vocab-count-row small faint' },
-        h('span', null, `匹配 ${items.length} 个词`),
-        items.length > shown ? h('button', { type: 'button', class: 'btn btn-sm btn-ghost', onclick: () => { shown += 120; renderList(); } }, `再显示 120 个（还有 ${items.length - shown}）`) : null,
-        h('span', { class: 'spacer' }),
-        items.length > shown ? h('button', { type: 'button', class: 'btn btn-sm btn-ghost', onclick: () => { shown = items.length; renderList(); } }, '显示全部') : null,
-      ));
-      listBox.appendChild(h('div', { class: 'vocab-grid' }, items.slice(0, shown).map(vocabCard)));
-      if (!items.length) listBox.appendChild(ui.empty('没有匹配的词', '换个关键词或放宽筛选条件。'));
+      gridBox.innerHTML = '';
+      shown = 0;
+      appendBatch();
+      connectObserver();
     };
     const topicOptions = [{ value: '', label: '全部主题' }].concat(Array.from(new Set(I.vocabList.concat(I.vocabExtendedList).map((w) => w.topic).filter(Boolean))).map((topic) => ({ value: topic, label: topic })));
     page.appendChild(h('div', { class: 'row' },
-      ui.searchBox('搜索英文或中文…', (value) => { filters.q = value; shown = 120; renderList(); }),
-      h('select', { class: 'select', onchange: (event) => { filters.source = event.target.value; shown = 120; renderList(); } },
+      ui.searchBox('搜索英文或中文…', (value) => { filters.q = value; renderList(); }),
+      h('select', { class: 'select', onchange: (event) => { filters.source = event.target.value; renderList(); } },
         h('option', { value: 'all' }, `全部词库（${totalAll}）`),
         h('option', { value: 'core' }, `核心精学（${I.vocabList.length}）`),
         h('option', { value: 'ext' }, `扩展认知（${I.vocabExtendedList.length}）`),
       ),
-      h('select', { class: 'select', onchange: (event) => { filters.level = event.target.value; shown = 120; renderList(); } },
+      h('select', { class: 'select', onchange: (event) => { filters.level = event.target.value; renderList(); } },
         h('option', { value: '' }, '全部难度'), ...[1, 2, 3, 4, 5, 6].map((level) => h('option', { value: String(level) }, levelLabel(level))),
       ),
-      h('select', { class: 'select', onchange: (event) => { filters.topic = event.target.value; shown = 120; renderList(); } },
+      h('select', { class: 'select', onchange: (event) => { filters.topic = event.target.value; renderList(); } },
         topicOptions.map((option) => h('option', { value: option.value }, option.label)),
       ),
-      h('label', { class: 'row small muted', style: { gap: '6px' } }, h('input', { type: 'checkbox', onchange: (event) => { filters.ielts = event.target.checked; shown = 120; renderList(); } }), '只看雅思词'),
+      h('label', { class: 'row small muted', style: { gap: '6px' } }, h('input', { type: 'checkbox', onchange: (event) => { filters.ielts = event.target.checked; renderList(); } }), '只看雅思词'),
     ));
     page.appendChild(h('div', { class: 'card' }, listBox));
     renderList();
@@ -53576,52 +53630,50 @@ window.EN_DATA.audio = {
   }
 
   /* ── 单词详情 ─────────────────────────────────────────────── */
-  function wordDetail(word) {
+  function wordDetailContent(word) {
     const status = wordStatus(word.id);
     const card = cardOf(word.id);
     const isExtended = !!I.vocabExtended[word.id];
-    const page = ui.page({ narrow: true, children: [] });
-    page.appendChild(h('div', { class: 'row' },
-      h('button', { type: 'button', class: 'btn btn-sm btn-ghost', onclick: () => EN.go('words/browse') }, icon('arrow-left', 14), '词库'),
-      h('div', { class: 'spacer' }),
-      h('button', { type: 'button', class: 'btn btn-sm', onclick: () => EN.go('words/spell?word=' + word.id) }, '听写这个词'),
+    const nodes = [];
+    const add = (node) => { nodes.push(node); return node; };
+    add(h('div', { class: 'row', style: { alignItems: 'center', flexWrap: 'wrap', gap: '8px' } },
+      h('span', { class: 'badge sky' }, levelLabel(word.level)),
+      isExtended ? h('span', { class: 'badge mint' }, '扩展认知词') : h('span', { class: 'badge' }, '核心精学词'),
+      word.ielts ? h('span', { class: 'badge accent' }, '雅思词') : null,
+      (word.tags || []).map((tag) => h('span', { class: 'badge' }, tag)),
     ));
-    page.appendChild(h('div', { class: 'card stack' },
-      h('div', { class: 'row', style: { alignItems: 'baseline' } },
-        h('span', { class: 'flash-word', style: { fontSize: '44px' } }, word.w),
-        h('span', { class: 'ipa', style: { fontSize: '17px' } }, word.ipa),
-        h('span', { class: 'small faint' }, word.pos || ''),
-        h('div', { class: 'spacer' }),
-        ui.audioBtn(word.w, { cls: 'lg' }),
-        h('button', { type: 'button', class: 'btn', onclick: () => EN.tts.saySlow(word.w) }, '慢速'),
-      ),
-      h('div', { class: 'row' },
-        h('span', { class: 'badge sky' }, levelLabel(word.level)),
-        isExtended ? h('span', { class: 'badge mint' }, '扩展认知词') : h('span', { class: 'badge' }, '核心精学词'),
-        word.ielts ? h('span', { class: 'badge accent' }, '雅思词') : null,
-        (word.tags || []).map((tag) => h('span', { class: 'badge' }, tag)),
-      ),
-      h('div', { class: 'callout key', style: { alignItems: 'flex-start' } },
-        h('span', { class: 'callout-icon' }, icon('book', 18)),
-        h('div', { class: 'stack tight', style: { flex: '1', minWidth: '0' } },
-          h('div', { class: 'row', style: { alignItems: 'baseline', flexWrap: 'wrap', gap: '8px' } },
-            h('span', { class: 'small faint' }, '中文意思'),
-            h('span', { style: { fontFamily: 'var(--serif)', fontSize: '24px', fontWeight: '700', color: 'var(--text-strong)' } }, word.zh || '（暂无释义）'),
-          ),
-          word.en ? h('div', { class: 'row', style: { alignItems: 'baseline', flexWrap: 'wrap', gap: '8px' } },
-            h('span', { class: 'small faint' }, '英文释义'),
-            h('span', { class: 'small', style: { color: 'var(--text)' } }, word.en),
-          ) : h('div', { class: 'small faint' }, isExtended ? '扩展词库只收「音标 + 中文释义」，暂无英文释义；需要英文解释/例句时可查核心词条或朗读材料。' : ''),
-          h('div', { class: 'tiny faint' }, [word.pos, '难度 ' + levelLabel(word.level), word.topic ? '主题 ' + word.topic : '', word.freq ? '频率 ' + word.freq : ''].filter(Boolean).join(' · ')),
+    add(h('div', { class: 'callout key', style: { alignItems: 'flex-start' } },
+      h('span', { class: 'callout-icon' }, icon('book', 18)),
+      h('div', { class: 'stack tight', style: { flex: '1', minWidth: '0' } },
+        h('div', { class: 'row', style: { alignItems: 'baseline', flexWrap: 'wrap', gap: '8px' } },
+          h('span', { class: 'small faint' }, '中文意思'),
+          h('span', { style: { fontFamily: 'var(--serif)', fontSize: '24px', fontWeight: '700', color: 'var(--text-strong)' } }, word.zh || '（暂无释义）'),
         ),
+        word.en ? h('div', { class: 'row', style: { alignItems: 'baseline', flexWrap: 'wrap', gap: '8px' } },
+          h('span', { class: 'small faint' }, '英文释义'),
+          h('span', { class: 'small', style: { color: 'var(--text)' } }, word.en),
+        ) : h('div', { class: 'small faint' }, isExtended ? '扩展词库只收「音标 + 中文释义」，暂无英文释义；需要英文解释/例句时可查核心词条或朗读材料。' : ''),
+        h('div', { class: 'tiny faint' }, [word.pos, '难度 ' + levelLabel(word.level), word.topic ? '主题 ' + word.topic : '', word.freq ? '频率 ' + word.freq : ''].filter(Boolean).join(' · ')),
       ),
-      h('div', { class: 'row' }, ...[0, 1, 2, 3].map((value) => h('button', {
-        type: 'button', class: 'pill' + (status === value ? ' active' : ''),
-        onclick: () => { EN.setPointStatus('vocab-' + word.id, value); if (value >= 1) EN.store.update((s) => { const current = s.vocab[word.id] || {}; s.vocab[word.id] = Object.assign(EN.reviewVocab(current, value >= 2 ? 2 : 1)); }); EN.render(); },
-      }, EN.statusLabel(value)))),
-      card ? h('div', { class: 'tiny faint' }, '下次复习：' + (card.due ? new Date(card.due).toLocaleDateString() : '未安排') + ' · 已复习 ' + (card.reps || 0) + ' 次') : null,
     ));
-    page.appendChild(h('div', { class: 'card stack' },
+    const pillGroup = h('div', { class: 'row', style: { gap: '5px' } }, ...[0, 1, 2, 3].map((value) => h('button', {
+      type: 'button', class: 'pill' + (status === value ? ' active' : ''), 'data-level': String(value),
+      onclick: (event) => {
+        EN.setPointStatus('vocab-' + word.id, value);
+        if (value >= 1) EN.store.update((state) => { const current = state.vocab[word.id] || {}; state.vocab[word.id] = Object.assign(EN.reviewVocab(current, value >= 2 ? 2 : 1)); });
+        Array.from(pillGroup.children).forEach((button) => button.classList.toggle('active', Number(button.getAttribute('data-level')) === value));
+        EN.toast('已标记为「' + EN.statusLabel(value) + '」');
+      },
+    }, EN.statusLabel(value))));
+    add(h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+      h('span', { class: 'small faint' }, '掌握度'),
+      pillGroup,
+    ));
+    add(h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } },
+      h('button', { type: 'button', class: 'btn btn-sm', onclick: () => EN.go('words/spell?word=' + word.id) }, icon('pen', 14), '听写这个词'),
+      card ? h('span', { class: 'tiny faint' }, '下次复习：' + (card.due ? new Date(card.due).toLocaleDateString() : '未安排') + ' · 已复习 ' + (card.reps || 0) + ' 次') : h('span', { class: 'tiny faint' }, '还没加入复习计划；答对题/标记掌握后会自动安排'),
+    ));
+    add(h('div', { class: 'card stack' },
       h('div', { class: 'h2' }, '例句'),
       word.example ? h('div', { class: 'example-line' },
         h('button', { type: 'button', class: 'audio-btn', onclick: () => EN.tts.say(word.example) }, icon('speaker', 14)),
@@ -53638,6 +53690,37 @@ window.EN_DATA.audio = {
         : null,
       word.note ? ui.callout('tip', '注意', h('div', { class: 'small' }, word.note)) : null,
     ));
+    return nodes;
+  }
+
+  function openWordModal(word) {
+    if (!word) return;
+    const sounds = h('div', { class: 'row', style: { alignItems: 'baseline', flexWrap: 'wrap', gap: '8px', marginBottom: '4px' } },
+      h('span', { style: { fontFamily: 'var(--serif)', fontSize: '28px', fontWeight: '700', color: 'var(--text-strong)' } }, word.w),
+      h('span', { class: 'ipa', style: { fontSize: '15px' } }, word.ipa || ''),
+      h('span', { class: 'small faint' }, word.pos || ''),
+      h('div', { class: 'spacer' }),
+      ui.audioBtn(word.w, { cls: 'lg' }),
+      h('button', { type: 'button', class: 'btn btn-sm', onclick: () => EN.tts.saySlow(word.w) }, '慢速'),
+    );
+    EN.openModal({
+      title: '单词详情',
+      children: [h('div', { class: 'word-detail-modal stack' }, sounds, ...wordDetailContent(word))],
+      actions: [
+        { label: '关闭' },
+        { label: '打开完整页面', primary: true, onClick: () => { EN.closeModal(); EN.go('words/word/' + word.id); } },
+      ],
+    });
+  }
+
+  function wordDetail(word) {
+    const page = ui.page({ narrow: true, children: [] });
+    page.appendChild(h('div', { class: 'row' },
+      h('button', { type: 'button', class: 'btn btn-sm btn-ghost', onclick: () => EN.go('words/browse') }, icon('arrow-left', 14), '词库'),
+      h('div', { class: 'spacer' }),
+      h('button', { type: 'button', class: 'btn btn-sm', onclick: () => EN.go('words/spell?word=' + word.id) }, '听写这个词'),
+    ));
+    wordDetailContent(word).forEach((node) => page.appendChild(node));
     return page;
   }
 
